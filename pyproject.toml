@@ -1,0 +1,23 @@
+[project]
+name = "agentic-from-scratch"
+version = "0.1.0"
+description = "A from-scratch OpenAI tool-calling agent backed by a FastAPI tool server."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "openai>=2.40.0",
+    "python-dotenv>=1.2.2",
+    "uvicorn[standard]>=0.48.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
