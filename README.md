@@ -5,6 +5,18 @@ A from-scratch OpenAI tool-calling agent built around a **reducer-style
 state machine**. No `langchain`, no `gradio`, no `streamlit` — the kind
 of thing you'd build in a live AI Engineer interview.
 
+## Branches
+
+| Branch | Purpose |
+| ------ | ------- |
+| **`master`** | Starter project — work through the checkpoints below. |
+| **`solution`** | Completed reference implementation (agent loop, server, streaming). |
+
+```bash
+git checkout solution   # see the finished code
+git checkout master     # back to the exercise
+```
+
 ## The problem
 
 Build an agent that satisfies user prompts by **chaining tool calls**.
