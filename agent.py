@@ -34,6 +34,7 @@ load_dotenv()
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_SERVER_URL = os.getenv("AGENT_SERVER_URL", "http://localhost:8000")
 DEFAULT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
+DEFAULT_STREAM = os.getenv("AGENT_STREAM", "false").lower() in {"1", "true", "yes"}
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ class Agent:
         client: OpenAI | None = None,
         tool_client: ToolServerClient | None = None,
         model: str = DEFAULT_MODEL,
-        system_prompt: str = (
+        system_prompt: str = (            
             "You are a tool-using agent driving a small finite state machine.\n"
             "\n"
             "STATE       = the running conversation (these messages).\n"
@@ -78,6 +79,7 @@ class Agent:
             "TRANSITIONS = the tool's return value is appended back to STATE,\n"
             "              then you decide the next action (or finish).\n"
             "\n"
+
             "Available actions:\n"
             "  - get_nanotime()                       -> {nanotime: int}\n"
             "  - day_of_week_from_nanotime(nanotime)  -> {day_of_week: str}\n"
@@ -91,11 +93,13 @@ class Agent:
             "explain the limitation honestly."
         ),
         max_steps: int = DEFAULT_MAX_STEPS,
+        stream: bool = DEFAULT_STREAM,
     ) -> None:
         self.client = client or OpenAI()
         self.tools = tool_client or ToolServerClient()
         self.model = model
         self.max_steps = max_steps
+        self.stream = stream
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
@@ -118,7 +122,23 @@ class Agent:
           3. If the loop exits without a final answer, raise RuntimeError
              (the model is stuck calling tools forever).
         """
-        raise NotImplementedError("Implement chat() - the agent loop")
+
+        self.messages.append({"role": "user", "content": user_message})
+        for _ in range(self.max_steps):
+            assistant_msg = self._call_model()
+            self.messages.append(assistant_msg)
+
+            tool_calls = assistant_msg.get("tool_calls")
+            if not tool_calls:
+                return assistant_msg["content"] or ""
+
+            for tool_call in tool_calls:
+                tool_msg = self._execute_tool_call(tool_call)
+                self.messages.append(tool_msg)
+
+        raise RuntimeError(
+            f"Agent exceeded max_steps ({self.max_steps}) without a final answer"
+        )
 
     # ----- Internals -------------------------------------------------------
 
@@ -126,32 +146,95 @@ class Agent:
         """Call OpenAI with current messages + tool schemas; return assistant msg.
 
         Return value must be a *plain dict* that we can append to self.messages
-        and re-send to the model on the next turn.
+        and re-send to the model on the next turn. When `self.stream` is enabled,
+        final-answer tokens are printed to stdout as they arrive.
+        """
+        if self.stream:
+            return self._call_model_stream()
+        return self._call_model_sync()
 
-        TODO (live):
-          - Call:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=TOOL_SCHEMAS,
-                    tool_choice="auto",
-                )
-          - Extract `msg = resp.choices[0].message`.
-          - Build the dict you'll return. Keep:
-                role        = "assistant"
-                content     = msg.content       # may be None when tools called
-                tool_calls  = [...] if msg.tool_calls else omitted
-            Each tool_call dict needs:
+    def _call_model_sync(self) -> dict[str, Any]:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+        )
+        return self._assistant_msg_from_sdk_message(resp.choices[0].message)
+
+    def _call_model_stream(self) -> dict[str, Any]:
+        """Stream tokens for the final answer; accumulate tool calls from deltas."""
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            stream=True,
+        )
+
+        content_parts: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            if delta.content:
+                print(delta.content, end="", flush=True)
+                content_parts.append(delta.content)
+
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_by_index:
+                        tool_calls_by_index[idx] = {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    tc = tool_calls_by_index[idx]
+                    if tc_delta.id:
+                        tc["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tc["function"]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tc["function"]["arguments"] += tc_delta.function.arguments
+
+        content = "".join(content_parts) or None
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": content,
+        }
+
+        if tool_calls_by_index:
+            assistant_msg["tool_calls"] = [
+                tool_calls_by_index[i] for i in sorted(tool_calls_by_index)
+            ]
+
+        return assistant_msg
+
+    @staticmethod
+    def _assistant_msg_from_sdk_message(msg: Any) -> dict[str, Any]:
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": msg.content,
+        }
+        if msg.tool_calls:
+            assistant_msg["tool_calls"] = [
                 {
-                    "id":   tc.id,
+                    "id": tc.id,
                     "type": "function",
                     "function": {
-                        "name":      tc.function.name,
-                        "arguments": tc.function.arguments,  # JSON string
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
                     },
                 }
-        """
-        raise NotImplementedError("Implement _call_model()")
+                for tc in msg.tool_calls
+            ]
+        return assistant_msg
+
 
     def _execute_tool_call(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         """Run one tool_call against our server, return a `role='tool'` message.
@@ -172,4 +255,18 @@ class Agent:
             so the model can see the failure and recover.
           - Return the tool message dict (note: content must be a STRING).
         """
-        raise NotImplementedError("Implement _execute_tool_call()")
+        name = tool_call["function"]["name"]
+        raw_args = tool_call["function"]["arguments"]
+        try:
+            args = json.loads(raw_args) if raw_args else {}
+            res = self.tools.call(name, args)
+            content = json.dumps(res["result"])
+        except Exception as e:
+            content = json.dumps({"error": str(e)})
+
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call["id"],
+            "content": content,
+        }
+

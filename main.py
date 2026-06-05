@@ -20,8 +20,9 @@ from agent import Agent
 
 
 def main() -> None:
-    print("Agent ready. Type a message, or 'exit' to quit.\n")
     agent = Agent()
+    mode = "streaming" if agent.stream else "standard"
+    print(f"Agent ready ({mode} mode). Type a message, or 'exit' to quit.\n")
     try:
         while True:
             try:
@@ -34,11 +35,16 @@ def main() -> None:
             if user.lower() in {"exit", "quit"}:
                 break
             try:
+                if agent.stream:
+                    print("bot> ", end="", flush=True)
                 reply = agent.chat(user)
             except Exception as e:  # noqa: BLE001 - keep the REPL alive while learning
                 print(f"[error] {e}", file=sys.stderr)
                 continue
-            print(f"bot> {reply}\n")
+            if agent.stream:
+                print("\n")
+            else:
+                print(f"bot> {reply}\n")
     finally:
         agent.tools.close()
 

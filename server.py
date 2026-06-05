@@ -54,4 +54,16 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
            - any other Exception   -> 500 with the error string
       2. On success, return {"name": name, "result": <whatever the tool returned>}.
     """
-    raise NotImplementedError("Implement POST /tools/{name}")
+    try:
+        result = dispatch_tool(name, arguments)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except TypeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"name": name, "result": result}
+
